@@ -24,6 +24,10 @@ from .storage import (
     add_expense,
     add_royalty,
     load,
+    remove_advance,
+    remove_book,
+    remove_expense,
+    remove_royalty,
     save,
     validate_date,
 )
@@ -187,6 +191,110 @@ def _cmd_statement(args) -> int:
 
 
 def _cmd_export(args) -> int:
+    title = None if args.all else args.book
+    return _export_csv(load(args.data), title, args.output)
+
+
+def _cmd_summary(args) -> int:
+    ledger = load(args.data)
+    if not ledger.books:
+        print("No books yet. Add one with: author-income-tracker add-book \"Title\"")
+        return 0
+
+    print("Author income summary")
+    print("=" * 40)
+
+    grand_royalties = 0
+    grand_advances = 0
+    grand_expenses = 0
+
+    for book in ledger.books:
+        royalties, advances, expenses = _entries_for_book(ledger, book.id)
+        royalties_total = total_royalties([r.amount for r in royalties])
+        advances_total = total_advances([a.amount for a in advances])
+        expenses_total = total_expenses([e.amount for e in expenses])
+        pnl = profit(royalties_total, expenses_total, advances_total)
+        done = earned_out(royalties_total, advances_total)
+
+        print(f"\n{book.title}")
+        print(f"  Royalties:  {format_usd(royalties_total):>12s}")
+        print(f"  Advances:   {format_usd(advances_total):>12s}")
+        print(f"  Expenses:   {format_usd(expenses_total):>12s}")
+        print(f"  Profit:     {format_usd(pnl):>12s}")
+        print(f"  Earned out: {'Yes' if done else 'No'}")
+
+        grand_royalties += royalties_total
+        grand_advances += advances_total
+        grand_expenses += expenses_total
+
+    print("\n" + "=" * 40)
+    print(f"{'All books':<16s} {format_usd(grand_royalties):>12s} "
+          f"{format_usd(grand_advances):>12s} {format_usd(grand_expenses):>12s} "
+          f"{format_usd(profit(grand_royalties, grand_expenses, grand_advances)):>12s}")
+    print()
+    print("Columns: royalties  advances  expenses  profit")
+    return 0
+
+
+def _cmd_remove_book(args) -> int:
+    try:
+        book = remove_book(load(args.data), args.title, path=args.data)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+    print(f"Removed book: {book.title} (and all its royalties, advances, and expenses)")
+    return 0
+
+
+def _cmd_remove_royalty(args) -> int:
+    try:
+        validate_date(args.date)
+        removed = remove_royalty(
+            load(args.data), args.book, args.platform, args.amount, args.date, path=args.data
+        )
+    except (ValueError, TypeError) as exc:
+        print(f"Error: {exc}")
+        return 1
+    if removed:
+        print(f"Removed {removed} royalty entr{'y' if removed == 1 else 'ies'}.")
+    else:
+        print("No matching royalty found.")
+    return 0
+
+
+def _cmd_remove_advance(args) -> int:
+    try:
+        validate_date(args.date)
+        removed = remove_advance(
+            load(args.data), args.book, args.amount, args.date, path=args.data
+        )
+    except (ValueError, TypeError) as exc:
+        print(f"Error: {exc}")
+        return 1
+    if removed:
+        print(f"Removed {removed} advance entr{'y' if removed == 1 else 'ies'}.")
+    else:
+        print("No matching advance found.")
+    return 0
+
+
+def _cmd_remove_expense(args) -> int:
+    try:
+        validate_date(args.date)
+        removed = remove_expense(
+            load(args.data), args.book, args.category, args.amount, args.date, path=args.data
+        )
+    except (ValueError, TypeError) as exc:
+        print(f"Error: {exc}")
+        return 1
+    if removed:
+        print(f"Removed {removed} expense entr{'y' if removed == 1 else 'ies'}.")
+    else:
+        print("No matching expense found.")
+    return 0
+
+
+def _cmd_export(args) -> int:
     return _export_csv(load(args.data), args.book if args.all is False else None, args.output)
 
 
@@ -229,13 +337,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_statement)
 
     p = sub.add_parser("export-csv", help="Export ledger rows to CSV")
-    p.add_argument("book", nargs="?", default=None, help="Book title (omit to export all books)")
-    p.add_argument("--all", action="store_true", help="Export all books (ignores positional book argument)")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("book", nargs="?", default=None, help="Book title (omit to export all books)")
+    group.add_argument("--all", action="store_true", help="Export all books (ignores positional book argument)")
     p.add_argument("--output", required=True, help="Output CSV path")
     p.set_defaults(func=_cmd_export)
 
     p = sub.add_parser("list-books", help="List known books")
     p.set_defaults(func=_list_books)
+
+    p = sub.add_parser("summary", help="Show a one-line summary across all books")
+    p.set_defaults(func=_cmd_summary)
+
+    p = sub.add_parser("remove-book", help="Remove a book and all its entries")
+    p.add_argument("title")
+    p.set_defaults(func=_cmd_remove_book)
+
+    p = sub.add_parser("remove-royalty", help="Remove a royalty entry by match criteria")
+    p.add_argument("book")
+    p.add_argument("platform")
+    p.add_argument("amount", help="Royalty amount, e.g. 1500.00")
+    p.add_argument("date", help="Date YYYY-MM-DD")
+    p.set_defaults(func=_cmd_remove_royalty)
+
+    p = sub.add_parser("remove-advance", help="Remove an advance entry by match criteria")
+    p.add_argument("book")
+    p.add_argument("amount", help="Advance amount, e.g. 1000.00")
+    p.add_argument("date", help="Date YYYY-MM-DD")
+    p.set_defaults(func=_cmd_remove_advance)
+
+    p = sub.add_parser("remove-expense", help="Remove an expense entry by match criteria")
+    p.add_argument("book")
+    p.add_argument("category", help="Expense category, e.g. 'Cover design'")
+    p.add_argument("amount", help="Expense amount, e.g. 200.00")
+    p.add_argument("date", help="Date YYYY-MM-DD")
+    p.set_defaults(func=_cmd_remove_expense)
 
     return parser
 
